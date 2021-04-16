@@ -1,8 +1,9 @@
-from flask import Flask,render_template,Response,request,redirect
+from flask import Flask,render_template,Response,request,redirect,jsonify
 import numpy as np
 import argparse
 import matplotlib.pyplot as plt
 import cv2
+from psycopg2 import sql
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout, Flatten
 from tensorflow.keras.layers import Conv2D
@@ -11,7 +12,7 @@ from tensorflow.keras.layers import MaxPooling2D
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import os
 import time
-from datetime import datetime
+import datetime
 from gaze_tracking import GazeTracking
 from math import sqrt
 import imutils
@@ -47,13 +48,12 @@ mydb = mysql.connector.connect(
 )
 cursor = mydb.cursor(buffered=True)
 global timestamp 
-timestamp=datetime.now().strftime('%Y-%m-%D %H:%M:%S')
+timestamp=datetime.datetime.now()
 
 @app.route('/send',methods=["GET","POST"])
 def send():
     global table1
     table1=request.form['user_name'] 
-    print(table1)
     return render_template('home.html')
 
 camera = cv2.VideoCapture(0)  
@@ -68,7 +68,7 @@ def gen_frames():  # generate frame by frame from camera
     if cursor.fetchone()[0]==1:
         print("table exists")
     else:
-        query1="""CREATE TABLE %s(id INT AUTO_INCREMENT PRIMARY KEY,data VARCHAR(255),time timestamp )""" %(table1)
+        query1="""CREATE TABLE %s(id INT AUTO_INCREMENT PRIMARY KEY,data VARCHAR(255),time timestamp,emotionid int)""" %(table1)
         cursor.execute(query1)
         mydb.commit()
 
@@ -84,7 +84,6 @@ def gen_frames():  # generate frame by frame from camera
             break
         else:
             model.load_weights('model.h5')
-           # cv2.ocl.setUseOpenCL(False)
             emotion_dict = {0: "Angry", 1: "Disgusted", 2: "Fearful", 3: "Happy", 4: "Neutral", 5: "Sad", 6: "Surprised"}
             gaze.refresh(frame)
 
@@ -106,33 +105,55 @@ def gen_frames():  # generate frame by frame from camera
             right_pupil = gaze.pupil_right_coords()
             cv2.putText(frame, "Left pupil:  " + str(left_pupil), (90, 130), cv2.FONT_HERSHEY_DUPLEX, 0.9, (147, 58, 31), 1)
             cv2.putText(frame, "Right pupil: " + str(right_pupil), (90, 165), cv2.FONT_HERSHEY_DUPLEX, 0.9, (147, 58, 31), 1)
-            ret,buffer = cv2.imencode('.jpg',frame)
+            
             facecasc =  cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = facecasc.detectMultiScale(gray,scaleFactor=1.3, minNeighbors=5)
-            for (x, y, w, h) in faces:
-                cv2.rectangle(frame, (x, y-50), (x+w, y+h+10), (255, 0, 0), 2)
-                roi_gray = gray[y:y + h, x:x + w]
-                cropped_img = np.expand_dims(np.expand_dims(cv2.resize(roi_gray, (48, 48)), -1), 0)
-                prediction = model.predict(cropped_img)
-                maxindex = int(np.argmax(prediction))
-                cv2.putText(frame, emotion_dict[maxindex], (x+20, y-60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+            try:
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(frame, (x, y-50), (x+w, y+h+10), (255, 0, 0), 2)
+                    roi_gray = gray[y:y + h, x:x + w]
+                    cropped_img = np.expand_dims(np.expand_dims(cv2.resize(roi_gray, (48, 48)), -1), 0)
+                    prediction = model.predict(cropped_img)
+                    maxindex = int(np.argmax(prediction))
+                    cv2.putText(frame, emotion_dict[maxindex], (x+20, y-60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2, cv2.LINE_AA)
+                    global buffer
+                    ret,buffer = cv2.imencode('.jpg',frame)
+                    frame = buffer.tobytes()
+                         
 
-                frame = buffer.tobytes()
-                                
+                    global s
+                    s = "Emotion:" + emotion_dict[maxindex]
 
-                global s
-                s = "Emotion:" + emotion_dict[maxindex] + " and Eye is: " + text
-                 
+                    query2 = """INSERT INTO {} (data,time,emotionid) VALUES ('%s','%s','%d')""".format(table1) % (s,timestamp,maxindex)  #Database query
+                    cursor.execute(query2)
+                    mydb.commit()
+                    yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + bytearray(buffer) + b'\r\n')  # concat frame one by one and show result
+            except:
+                print("error occured")
 
-             #   print(s)
-          #      query2 = """INSERT INTO{}(data,time) VALUES ('%s','%s')""".format(table1) % (s,timestamp)   #Database query
-           #     cursor.execute(query2)
-            #    mydb.commit()
-           # cv2.imshow('Video', cv2.resize(frame,(1600,960),interpolation = cv2.INTER_CUBIC))
-            yield (b'--frame\r\n'
-                b'Content-Type: image/jpeg\r\n\r\n' + bytearray(buffer) + b'\r\n')  # concat frame one by one and show result
+@app.route('/getAnalytics')
 
+def getAnalytics():
+    try:
+        table2=request.args['name']
+        query2 = """SELECT COUNT(emotionid) as Count ,time ,data FROM {} GROUP BY emotionid""".format(table2)  #Database query
+    # query2= """SELECT COUNT(emotionid) as COUNT ,time ,data FROM  ${table2} GROUP BY emotionid""" 
+        cursor.execute(query2)
+        #rows=cursor.fetchone()
+        columns = cursor.description
+        result = []
+        for value in cursor.fetchall():
+            tmp = {}
+            for (index,column) in enumerate(value):
+                tmp[columns[index][0]] = column
+            result.append(tmp)
+        response = jsonify(result)
+
+        return response
+    except Exception as e:
+        return e
+            
 
 
 @app.route('/video_feed')
